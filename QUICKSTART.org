@@ -1,0 +1,129 @@
+#+TITLE: ob-tmux-extensions Quick Start
+#+PROPERTY: header-args:tmux :session demo:main
+
+* Installation Complete! 🎉
+
+Your Doom config now includes ob-tmux-extensions.
+
+** Next Step: Sync Doom
+
+Run this command:
+
+#+begin_src shell :results output
+~/.config/emacs/bin/doom sync
+#+end_src
+
+Then restart Emacs or: =M-x doom/reload=
+
+* Test It Out
+
+Create a tmux session first:
+
+#+begin_src shell :results silent
+tmux has-session -t demo 2>/dev/null || tmux new-session -d -s demo -n main
+#+end_src
+
+** Method 1: Pane Snapshot (simplest)
+
+Just grab what's currently in the pane:
+
+#+begin_src tmux :capture pane
+#+end_src
+
+** Method 2: Markers (execute + capture)
+
+Execute commands and capture output:
+
+#+begin_src tmux :capture markers :timeout 10
+echo "Hello from ob-tmux-capture!"
+date
+uname -n
+#+end_src
+
+** Method 3: Asciinema (recording)
+
+Record with asciinema:
+
+#+begin_src tmux :capture asciinema :timeout 10
+echo "=== Recording this ==="
+for i in 1 2 3; do
+  echo "Count: $i"
+  sleep 0.5
+done
+echo "Done!"
+#+end_src
+
+** Method 4: With CAST_LOG
+
+Keep a history of recordings:
+
+#+begin_src tmux :capture asciinema :log yes :timeout 10
+echo "Logged execution"
+uptime
+#+end_src
+
+* Header Args Reference
+
+| Arg | Values | Default | What it does |
+|-----|--------|---------|--------------|
+| =:capture= | pane, markers, asciinema | markers | How to capture |
+| =:timeout= | seconds | 30 | Max wait time |
+| =:log= | yes/no | no | CAST_LOG drawer |
+| =:lines= | N or -N | none | First/last N lines |
+| =:grep= | "pattern" | none | Filter by regex |
+
+* Troubleshooting
+
+** Package not found after sync
+
+Check: =M-x straight-check-package RET ob-tmux-capture=
+
+Rebuild: =M-x straight-rebuild-package RET ob-tmux-capture=
+
+** Capture not working
+
+Check advice is enabled:
+
+#+begin_src emacs-lisp :results output
+(princ (if (advice-member-p 'ob-tmux-capture--advice-execute 'org-babel-execute:tmux)
+           "✓ Advice enabled"
+         "✗ Advice NOT enabled - run (ob-tmux-capture-enable-advice)"))
+#+end_src
+
+** Need help
+
+- See full docs: [[file:README.org]]
+- Design docs: [[file:/var/srv/research/org/docs/ob-tmux-capture.org]]
+- Live examples: [[file:/var/srv/research/org/docs/ob-tmux-demo.org]]
+
+* What Just Got Installed
+
+Two packages working together:
+
+1. *ob-tmux-capture* - Core capture (pane, markers)
+2. *ob-tmux-asciinema* - Recording & streaming
+
+Both are in: =~/src/ob-tmux-extensions/=
+
+Doom config updated:
+- =~/.config/doom/packages.el= - package declarations
+- =~/.config/doom/config.el= - configuration
+
+* Configuration
+
+Current settings (from config.el):
+
+#+begin_src emacs-lisp :results output
+(princ (format "Timeout: %s seconds
+Strip ANSI: %s
+Server: %s
+Idle limit: %s seconds
+Keep casts: %s"
+  ob-tmux-capture-timeout
+  ob-tmux-capture-strip-ansi
+  (or ob-tmux-asciinema-server-url "not set")
+  ob-tmux-asciinema-idle-time-limit
+  ob-tmux-asciinema-keep-cast))
+#+end_src
+
+Customize in =~/.config/doom/config.el=.
