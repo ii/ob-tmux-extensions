@@ -1,0 +1,157 @@
+#+TITLE: ob-tmux Extensions
+#+SUBTITLE: Output capture and asciinema recording for org-babel tmux blocks
+#+AUTHOR: ii.coop
+
+* Overview
+
+This package adds output capture capabilities to =ob-tmux= and =ob-tmate= blocks, solving the 6-year-old [[https://github.com/ahendriksen/ob-tmux/issues/6][Issue #6]].
+
+** Packages
+
+| Package | Purpose |
+|---------|---------|
+| =ob-tmux-capture.el= | Capture tmux pane output (markers, pane snapshot) |
+| =ob-tmux-asciinema.el= | Asciinema recording, streaming, metadata |
+
+* Features
+
+** Capture Methods
+
+| Method | Description | Use Case |
+|--------|-------------|----------|
+| =:capture pane= | Snapshot current pane | Quick manual capture |
+| =:capture markers= | Execute with BEGIN/END markers, poll for completion | Automated capture |
+| =:capture asciinema= | Record with asciinema, parse to text | Documentation, demos, audit trails |
+
+** Asciinema Integration
+
+- 📹 Record terminal sessions
+- 🌐 Live streaming to asciinema server
+- 📝 CAST_LOG drawer with execution history
+- 🏷️  Automatic metadata (title, tags) from org context
+- 💾 Flexible storage (XDG, local, custom paths)
+
+* Quick Start
+
+** Installation
+
+*** With Doom Emacs
+
+Add to =~/.config/doom/packages.el=:
+
+#+begin_src emacs-lisp
+(package! ob-tmux)
+(package! ob-tmux-capture
+  :recipe (:local-repo "~/src/ob-tmux-extensions"))
+(package! ob-tmux-asciinema
+  :recipe (:local-repo "~/src/ob-tmux-extensions"))
+#+end_src
+
+Add to =~/.config/doom/config.el=:
+
+#+begin_src emacs-lisp
+(use-package! ob-tmux-capture
+  :after ob-tmux
+  :config
+  (ob-tmux-capture-enable-advice))
+
+(use-package! ob-tmux-asciinema
+  :after ob-tmux-capture
+  :config
+  (setq ob-tmux-asciinema-server-url "https://asciinema.mcclimans.net"))
+#+end_src
+
+Run: =~/.config/emacs/bin/doom sync=
+
+*** With vanilla Emacs
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/src/ob-tmux-extensions")
+(require 'ob-tmux-capture)
+(require 'ob-tmux-asciinema)
+(ob-tmux-capture-enable-advice)
+#+end_src
+
+** Basic Usage
+
+*** Pane snapshot (no execution)
+
+#+begin_src org
+,#+begin_src tmux :session demo:main :capture pane
+,#+end_src
+#+end_src
+
+*** Execute with markers
+
+#+begin_src org
+,#+begin_src tmux :session demo:main :capture markers
+kubectl get pods
+,#+end_src
+#+end_src
+
+*** Record with asciinema
+
+#+begin_src org
+,#+begin_src tmux :session demo:main :capture asciinema :log yes
+echo "Recording this!"
+date
+,#+end_src
+#+end_src
+
+* Header Arguments
+
+| Argument | Values | Default | Description |
+|----------|--------|---------|-------------|
+| =:capture= | pane, markers, asciinema | markers | Capture method |
+| =:timeout= | seconds | 30 | Max wait time |
+| =:log= | yes, no | no | Enable CAST_LOG drawer |
+| =:cast-dir= | local, /path | XDG | Cast file storage |
+| =:keep-cast= | yes, no | no | Retain cast file |
+| =:stream-to= | stream-id | nil | Remote streaming |
+| =:idle-limit= | seconds | 2 | Max idle in recording |
+| =:lines= | N or -N | nil | Filter output (first/last N lines) |
+| =:grep= | pattern | nil | Filter output by regex |
+
+* Configuration
+
+** XDG Storage (default)
+
+Cast files stored in =~/.local/share/ob-tmux-casts/=
+
+** Local Storage (next to org file)
+
+#+begin_src org
+,#+PROPERTY: header-args:tmux :cast-dir local
+#+end_src
+
+Creates =.ob-tmux-casts/= subdirectory.
+
+** Streaming
+
+Set up stream registry in =~/.config/doom/config.el=:
+
+#+begin_src emacs-lisp
+(setq ob-tmux-asciinema-stream-registry
+      '(("demo" . "your-producer-token-here")
+        ("tinkerbell" . "another-token")))
+#+end_src
+
+Or use =#+STREAM:= keywords in org files.
+
+* Examples
+
+See [[file:/var/srv/research/org/docs/ob-tmux-demo.org][ob-tmux-demo.org]] for live examples.
+
+* Design Documentation
+
+Full design docs in [[file:/var/srv/research/org/docs/][/var/srv/research/org/docs/]]:
+
+- [[file:/var/srv/research/org/docs/ob-tmux-capture.org][ob-tmux-capture.org]] - Design rationale, implementation approaches
+- [[file:/var/srv/research/org/docs/pane-stream-design.org][pane-stream-design.org]] - Pane streaming architecture
+- [[file:/var/srv/research/org/docs/ob-tmux-demo.org][ob-tmux-demo.org]] - Live usage examples
+
+* Credits
+
+Built by ii.coop research team, solving [[https://github.com/ahendriksen/ob-tmux/issues/6][ahendriksen/ob-tmux#6]].
+
+Based on =ob-tmux= by Allard Hendriksen.

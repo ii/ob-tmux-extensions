@@ -1,0 +1,4 @@
+*.elc
+*~
+*.bak
+.DS_Store
