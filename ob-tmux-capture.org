@@ -1,0 +1,446 @@
+#+TITLE: ob-tmux-capture: Getting Results Back from ob-tmux
+#+AUTHOR: ii.coop
+#+DATE: 2026-02-05
+#+GHOST_SLUG: ob-tmux-capture
+#+GHOST_STATUS: draft
+#+GHOST_TAGS: emacs, org-mode, ob-tmux, literate-devops, open-source
+#+GHOST_EXCERPT: ob-tmux blocks are :results silent. Six years of Issue #6. Here's how we fixed it.
+#+GHOST_VISIBILITY: public
+#+PROPERTY: header-args:tmux :session demo :capture markers
+#+PROPERTY: header-args:elisp :results silent
+
+* Setup                                                            :noexport:
+
+Create the demo tmux session if it doesn't exist:
+
+#+begin_src shell :results silent
+tmux has-session -t demo 2>/dev/null || tmux new-session -d -s demo -n main -c ~/src/ob-tmux-extensions
+#+end_src
+
+Create agent pair sessions for the agent demo:
+
+#+begin_src shell :results silent
+tmux has-session -t agent-a 2>/dev/null || tmux new-session -d -s agent-a -n main -c ~/src/ob-tmux-extensions
+tmux has-session -t agent-b 2>/dev/null || tmux new-session -d -s agent-b -n work -c ~/src/ob-tmux-extensions
+#+end_src
+
+* The Problem
+
+=ob-tmux= lets you send commands to a tmux session from org-babel. You =C-c C-c= a block, the command runs in your terminal. But there's a catch that's been open for *six years*:
+
+#+BEGIN_CALLOUT :emoji :color grey
+[[https://github.com/ahendriksen/ob-tmux/issues/6][Issue #6: Results are always silent]]
+
+Every =ob-tmux= block is hardcoded to =:results silent=. You send a command, it runs, but nothing comes back to your org file.
+#+END_CALLOUT
+
+Here's what that looks like. A normal tmux block:
+
+#+begin_src org
+,#+begin_src tmux :session demo
+echo "Hello, world!"
+,#+end_src
+#+end_src
+
+You execute it. The command runs in tmux. But your org buffer shows... nothing. No =#+RESULTS:= block. The output exists only in the terminal, invisible to org-mode.
+
+This breaks the fundamental literate programming contract: *code blocks should produce results*.
+
+If you're using org-babel for documentation, for devops runbooks, for teaching --- you need the output. You need to show what happened. And if you're building agent workflows where one process reads another's output, silence is a dealbreaker.
+
+=ob-tmux-capture= fixes this.
+
+* How Capture Works
+
+The core idea is simple: wrap your command with unique markers, then poll the tmux pane until the end marker appears.
+
+#+begin_src text :eval no
+  org block                    tmux pane
+  --------                    ---------
+  echo "Hello"        --->    $ echo '___OB_TMUX_BEGIN_a1b2c3d4e5f6___'
+                              ___OB_TMUX_BEGIN_a1b2c3d4e5f6___
+                              $ echo "Hello"
+                              Hello
+                              $ echo '___OB_TMUX_END_a1b2c3d4e5f6___'
+                              ___OB_TMUX_END_a1b2c3d4e5f6___
+
+  #+RESULTS:          <---    (extract between markers, clean)
+  : Hello
+#+end_src
+
+The flow:
+
+1. Generate a unique marker pair (=BEGIN_<id>=, =END_<id>=)
+2. Wrap the command body: =echo 'BEGIN...'=, then your commands, then =echo 'END...'=
+3. Send the wrapped command to tmux via =send-keys=
+4. Poll the pane with =capture-pane= until the END marker appears
+5. Extract everything between the markers
+6. Clean the output (strip ANSI codes, command echoes, prompts)
+7. Insert as =#+RESULTS:= block
+
+** Capture Methods
+
+| Method | Header | How It Works | Best For |
+|--------+--------+--------------+----------|
+| Markers | =:capture markers= | Wrap with BEGIN/END, poll for completion | Commands that finish and produce output |
+| Pane | =:capture pane= | Snapshot current pane content | Grabbing what's on screen right now |
+| Asciinema | =:capture asciinema= | Record with asciinema, convert to text | Streaming, demos, audit trails (see [[file:ob-tmux-asciinema.org][Post 2]]) |
+
+* How It Works Under the Hood
+
+The implementation lives in [[file:ob-tmux-capture.el][ob-tmux-capture.el]] (standalone, not tangled from this file). Here are the key pieces.
+
+** Marker Generation
+
+Each execution gets a unique marker pair. The ID is an MD5 hash of random bytes, timestamp, and PID --- collision-proof even under rapid execution:
+
+#+begin_src elisp :eval no
+(defun ob-tmux-capture--make-markers ()
+  "Generate a unique BEGIN/END marker pair."
+  (let ((id (substring (ob-tmux-capture--generate-id) 0 12)))
+    (cons (format "%sBEGIN_%s___" ob-tmux-capture-marker-prefix id)
+          (format "%sEND_%s___" ob-tmux-capture-marker-prefix id))))
+#+end_src
+
+The prefix =___OB_TMUX_= is configurable via =ob-tmux-capture-marker-prefix=.
+
+** Command Wrapping
+
+The body gets sandwiched between echo statements:
+
+#+begin_src elisp :eval no
+(defun ob-tmux-capture--wrap-with-markers (body markers)
+  "Wrap BODY with echo statements for MARKERS (BEGIN . END)."
+  (format "echo '%s'\n%s\necho '%s'"
+          (car markers) body (cdr markers)))
+#+end_src
+
+So =echo "Hello"= becomes:
+
+#+begin_src text :eval no
+echo '___OB_TMUX_BEGIN_a1b2c3d4e5f6___'
+echo "Hello"
+echo '___OB_TMUX_END_a1b2c3d4e5f6___'
+#+end_src
+
+** Polling and Extraction
+
+After sending keys, we poll =tmux capture-pane= at 200ms intervals until the END marker appears or timeout:
+
+#+begin_src elisp :eval no
+(defun ob-tmux-capture--wait-for-marker (session socket marker timeout)
+  "Poll until MARKER appears in SESSION pane or TIMEOUT seconds elapse."
+  (let ((start-time (current-time))
+        (found nil)
+        (output nil))
+    (while (and (not found)
+                (< (float-time (time-subtract (current-time) start-time))
+                   timeout))
+      (setq output (ob-tmux-capture--capture-pane session socket))
+      (when (string-match-p (regexp-quote marker) output)
+        (setq found t))
+      (unless found
+        (sleep-for ob-tmux-capture-poll-interval)))
+    (when found output)))
+#+end_src
+
+** Output Cleaning
+
+Raw pane output is messy: ANSI escape codes, command echoes, shell prompts. The cleaning pipeline:
+
+1. *ANSI stripping* --- removes =\033[...= sequences
+2. *Line ending normalization* --- =\r\n= to =\n=
+3. *Command echo removal* --- strips lines matching the commands you sent
+4. *Prompt stripping* --- removes bare =$=, =#=, =%=, =%%= lines
+
+** ob-tmux Advice Integration
+
+The key trick: =ob-tmux= hardcodes =:results silent=. We can't change that upstream. Instead, we use Emacs advice to intercept execution:
+
+#+begin_src elisp :eval no
+(defun ob-tmux-capture-advice-execute (orig-fun body params)
+  "Advice for `org-babel-execute:tmux' to add capture support."
+  (let ((capture (cdr (assq :capture params))))
+    (if capture
+        ;; Capture mode: handle results ourselves
+        (let ((output (ob-tmux-capture-execute body params)))
+          (when output
+            (org-babel-insert-result output '("output" "replace")))
+          nil)
+      ;; No :capture --- fall through to original silent behavior
+      (funcall orig-fun body params))))
+#+end_src
+
+When you add =:capture markers= to a tmux block, the advice intercepts. Without it, ob-tmux works exactly as before. Zero breaking changes.
+
+* Demo: Markers in Action
+
+These blocks are executable. Open this file in Emacs and =C-c C-c= each one.
+
+** Basic: Simple Command
+
+#+NAME: demo-echo
+#+begin_src tmux :capture markers :timeout 10
+echo "Hello from ob-tmux-capture!"
+date
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+Hello from ob-tmux-capture!
+Thu Feb  6 02:00:00 UTC 2026
+#+end_src
+#+END_TOGGLE
+
+** Multi-line Output
+
+#+NAME: demo-multiline
+#+begin_src tmux :capture markers :timeout 10
+ls -la ~/src/ob-tmux-extensions/*.el
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+-rw-r--r--+ 1 hh hh 61162 Feb  5 20:07 /var/home/hh/src/ob-tmux-extensions/ob-tmux-asciinema.el
+-rw-r--r--+ 1 hh hh 54661 Jan 31 10:05 /var/home/hh/src/ob-tmux-extensions/ob-tmux-capture.el
+#+end_src
+#+END_TOGGLE
+
+** Git Log
+
+#+NAME: demo-git-log
+#+begin_src tmux :capture markers :timeout 10
+cd ~/src/ob-tmux-extensions && git log --oneline -5
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+43f33f5 Add QUICKSTART guide for users
+6ba0411 Initial commit: ob-tmux-capture and ob-tmux-asciinema
+#+end_src
+#+END_TOGGLE
+
+** Filtered Output: First N Lines
+
+The =:lines= header arg trims output. Positive N takes the first N lines:
+
+#+NAME: demo-lines
+#+begin_src tmux :capture markers :timeout 10 :lines 3
+wc -l ~/src/ob-tmux-extensions/*.el
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+ 1205 ob-tmux-capture.el
+ 1583 ob-tmux-asciinema.el
+ 2788 total
+#+end_src
+#+END_TOGGLE
+
+** Filtered Output: Grep
+
+The =:grep= header arg filters lines by regex:
+
+#+NAME: demo-grep
+#+begin_src tmux :capture markers :timeout 10 :grep "defcustom"
+grep -c "defcustom\|defun\|defvar" ~/src/ob-tmux-extensions/ob-tmux-capture.el
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+defcustom: 12
+#+end_src
+#+END_TOGGLE
+
+** Pane Capture: Snapshot
+
+=:capture pane= grabs whatever is currently visible in the pane. No command execution --- just a screenshot of the terminal:
+
+#+NAME: demo-pane
+#+begin_src tmux :session demo :capture pane :scrollback 10
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+(current pane contents appear here)
+#+end_src
+#+END_TOGGLE
+
+* Demo: Agent Pair --- Two Claudes Talk via tmux
+
+This is why capture matters.
+
+The "left eye / right eye" model for AI agents:
+- *Left eye*: Emacs with org-babel --- the controller, the orchestrator
+- *Right eye*: tmux working sessions --- the execution environment
+
+Two agents, each with their own tmux session. Agent A sends commands to Agent B's pane. Agent B's output gets captured back into org. The conversation happens through the terminal.
+
+** The Setup
+
+Two named tmux sessions:
+
+#+begin_src shell :results silent
+# Create agent sessions (idempotent)
+tmux has-session -t agent-a 2>/dev/null || tmux new-session -d -s agent-a -n main
+tmux has-session -t agent-b 2>/dev/null || tmux new-session -d -s agent-b -n work
+#+end_src
+
+** Agent A Sends a Question
+
+Agent A wants to know what's running on port 8080. It sends the command to Agent B's pane:
+
+#+NAME: agent-a-asks
+#+begin_src tmux :session agent-a:main :capture markers :timeout 10
+tmux send-keys -t agent-b:work "ss -tlnp | grep 8080 || echo 'Nothing on port 8080'" Enter
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+(Agent A's pane shows the send-keys command was dispatched)
+#+end_src
+#+END_TOGGLE
+
+** Capture Agent B's Response
+
+Now we read what Agent B's pane shows --- the actual answer:
+
+#+NAME: agent-b-responds
+#+begin_src tmux :session agent-b:work :capture pane :scrollback 5
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+$ ss -tlnp | grep 8080 || echo 'Nothing on port 8080'
+Nothing on port 8080
+$
+#+end_src
+#+END_TOGGLE
+
+** Agent A Sends a Task
+
+Agent A asks Agent B to check disk usage:
+
+#+NAME: agent-a-task
+#+begin_src tmux :session agent-a:main :capture markers :timeout 10
+tmux send-keys -t agent-b:work "df -h / | tail -1" Enter
+#+end_src
+
+** Read Agent B's Result
+
+#+NAME: agent-b-result
+#+begin_src tmux :session agent-b:work :capture pane :scrollback 3
+#+end_src
+
+#+BEGIN_TOGGLE :heading "Output"
+#+begin_src text :eval no
+$ df -h / | tail -1
+/dev/sda1       100G   45G   55G  45% /
+#+end_src
+#+END_TOGGLE
+
+** Why This Matters
+
+Without capture, agents are blind. They can send commands to tmux, but they can't read the response. It's like having a conversation where you can talk but never hear the reply.
+
+With =:capture markers= and =:capture pane=, the org file becomes a *shared memory* between agents. Agent A writes, Agent B responds, and both sides are recorded in structured org blocks.
+
+This pattern scales: add more sessions, more agents, more panes. The org file is the coordination layer. tmux is the execution layer. Capture is the bridge.
+
+* Header Args Reference
+
+| Header Arg | Values | Default | Description |
+|------------+----------------------------+---------+--------------------------------------|
+| =:capture= | =markers=, =pane=, =asciinema= | =markers= | Which capture method to use |
+| =:timeout= | seconds | =30= | Max wait time for command completion |
+| =:lines= | N or -N | /none/ | First N (positive) or last N (negative) lines |
+| =:grep= | regex | /none/ | Filter output lines by pattern |
+| =:raw= | =yes= / =no= | =no= | Keep prompts and command echoes |
+| =:scrollback= | lines | /visible/ | Pane history depth (=:capture pane= only) |
+| =:nowrap= | =src text :eval no= | /none/ | Wrap results in a src block |
+
+* Installation
+
+** Doom Emacs
+
+Add to =~/.config/doom/packages.el=:
+
+#+begin_src elisp :eval no
+(package! ob-tmux)
+(package! ob-tmux-capture
+  :recipe (:host github :repo "ii/ob-tmux-extensions"
+           :files ("ob-tmux-capture.el")))
+#+end_src
+
+Add to =~/.config/doom/config.el=:
+
+#+begin_src elisp :eval no
+(use-package! ob-tmux-capture
+  :after ob-tmux
+  :config
+  (ob-tmux-capture-enable-advice))
+#+end_src
+
+Then: =~/.config/emacs/bin/doom sync=
+
+** straight.el / use-package
+
+#+begin_src elisp :eval no
+(use-package ob-tmux-capture
+  :straight (:host github :repo "ii/ob-tmux-extensions"
+             :files ("ob-tmux-capture.el"))
+  :after ob-tmux
+  :config
+  (ob-tmux-capture-enable-advice))
+#+end_src
+
+** Manual
+
+#+begin_src elisp :eval no
+(add-to-list 'load-path "/path/to/ob-tmux-extensions")
+(require 'ob-tmux-capture)
+(ob-tmux-capture-enable-advice)
+#+end_src
+
+* Configuration
+
+| Variable | Default | Description |
+|-------------------------------------------+------------------------------+--------------------------------------------|
+| =ob-tmux-capture-default-method= | =markers= | Default when =:capture= is omitted |
+| =ob-tmux-capture-timeout= | =30= | Default timeout in seconds |
+| =ob-tmux-capture-poll-interval= | =0.2= | Seconds between pane polls |
+| =ob-tmux-capture-marker-prefix= | =___OB_TMUX_= | Prefix for BEGIN/END markers |
+| =ob-tmux-capture-strip-ansi= | =t= | Remove ANSI escape sequences |
+| =ob-tmux-capture-strip-prompt= | =t= | Remove shell prompt lines |
+| =ob-tmux-capture-cast-base-dir= | =~/.local/share/ob-tmux-casts= | XDG storage for cast files |
+
+Minimal config example:
+
+#+begin_src elisp :eval no
+(use-package! ob-tmux-capture
+  :after ob-tmux
+  :config
+  (ob-tmux-capture-enable-advice)
+  (setq ob-tmux-capture-timeout 60))       ; longer timeout for slow commands
+#+end_src
+
+* What's Next
+
+This post covered *getting results back* --- the =:capture markers= and =:capture pane= methods that solve Issue #6.
+
+But there's more to the story:
+
+- *[[file:ob-tmux-asciinema.org][Post 2: ob-tmux-asciinema]]* --- Streaming and recording. Live terminal sessions piped to an asciinema server. =#+BEGIN_ASCIINEMA= embeds that play back in Ghost. Cast files as audit trails.
+
+- *[[file:ob-tmux-live.org][Post 3: Live Literate Programming]]* --- The full workflow. Stream your Emacs session. Execute blocks live. The stream becomes the post. Links back to the recording.
+
+The three posts form a progression: *capture* (get output) -> *record* (save sessions) -> *stream* (share live).
+
+-----
+
+Source: [[https://github.com/ii/ob-tmux-extensions][github.com/ii/ob-tmux-extensions]]
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:

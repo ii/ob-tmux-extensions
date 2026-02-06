@@ -1,50 +1,41 @@
-#+TITLE: ob-tmux Extensions
-#+SUBTITLE: Output capture and asciinema recording for org-babel tmux blocks
+#+TITLE: ob-tmux-extensions
 #+AUTHOR: ii.coop
 
-* Overview
+=ob-tmux= is =:results silent=. These extensions fix that.
 
-This package adds output capture capabilities to =ob-tmux= and =ob-tmate= blocks, solving the 6-year-old [[https://github.com/ahendriksen/ob-tmux/issues/6][Issue #6]].
+[[https://github.com/ahendriksen/ob-tmux/issues/6][Issue #6]] has been open for six years: you =C-c C-c= a tmux block, the command runs, but nothing comes back to your org file. This repo adds output capture, asciinema recording, and live streaming to =ob-tmux= blocks.
 
-** Packages
+* Posts
 
-| Package | Purpose |
-|---------|---------|
-| =ob-tmux-capture.el= | Capture tmux pane output (markers, pane snapshot) |
-| =ob-tmux-asciinema.el= | Asciinema recording, streaming, metadata |
+Each =.org= file is both an executable demo and a publishable post (via [[https://github.com/ii/ox-ghost][ox-ghost]]).
 
-* Features
+- [[file:ob-tmux-capture.org][ob-tmux-capture]] --- Getting results back. Marker-based capture, pane snapshots, output filtering, and an agent-pair demo showing two Claudes talking via tmux.
+- [[file:ob-tmux-asciinema.org][ob-tmux-asciinema]] --- Streaming and recording. Live terminal sessions, cast files, =#+BEGIN_ASCIINEMA= embeds. /(coming soon)/
+- [[file:ob-tmux-live.org][ob-tmux-live]] --- Live literate programming. Stream-to-post workflow. /(coming soon)/
 
-** Capture Methods
+* Packages
 
-| Method | Description | Use Case |
-|--------|-------------|----------|
-| =:capture pane= | Snapshot current pane | Quick manual capture |
-| =:capture markers= | Execute with BEGIN/END markers, poll for completion | Automated capture |
-| =:capture asciinema= | Record with asciinema, parse to text | Documentation, demos, audit trails |
+| Package | File | Purpose |
+|---------+------+---------|
+| =ob-tmux-capture= | [[file:ob-tmux-capture.el][ob-tmux-capture.el]] | Capture tmux pane output (markers, pane snapshot) |
+| =ob-tmux-asciinema= | [[file:ob-tmux-asciinema.el][ob-tmux-asciinema.el]] | Asciinema recording, streaming, metadata |
 
-** Asciinema Integration
+The =.el= files are standalone packages. The =.org= files demonstrate and document them --- they don't tangle/generate the elisp.
 
-- 📹 Record terminal sessions
-- 🌐 Live streaming to asciinema server
-- 📝 CAST_LOG drawer with execution history
-- 🏷️  Automatic metadata (title, tags) from org context
-- 💾 Flexible storage (XDG, local, custom paths)
+* Installation
 
-* Quick Start
-
-** Installation
-
-*** With Doom Emacs
+** Doom Emacs
 
 Add to =~/.config/doom/packages.el=:
 
 #+begin_src emacs-lisp
 (package! ob-tmux)
 (package! ob-tmux-capture
-  :recipe (:local-repo "~/src/ob-tmux-extensions"))
+  :recipe (:host github :repo "ii/ob-tmux-extensions"
+           :files ("ob-tmux-capture.el")))
 (package! ob-tmux-asciinema
-  :recipe (:local-repo "~/src/ob-tmux-extensions"))
+  :recipe (:host github :repo "ii/ob-tmux-extensions"
+           :files ("ob-tmux-asciinema.el")))
 #+end_src
 
 Add to =~/.config/doom/config.el=:
@@ -61,9 +52,25 @@ Add to =~/.config/doom/config.el=:
   (setq ob-tmux-asciinema-server-url "https://asciinema.mcclimans.net"))
 #+end_src
 
-Run: =~/.config/emacs/bin/doom sync=
+Then: =~/.config/emacs/bin/doom sync=
 
-*** With vanilla Emacs
+** straight.el / use-package
+
+#+begin_src emacs-lisp
+(use-package ob-tmux-capture
+  :straight (:host github :repo "ii/ob-tmux-extensions"
+             :files ("ob-tmux-capture.el"))
+  :after ob-tmux
+  :config
+  (ob-tmux-capture-enable-advice))
+
+(use-package ob-tmux-asciinema
+  :straight (:host github :repo "ii/ob-tmux-extensions"
+             :files ("ob-tmux-asciinema.el"))
+  :after ob-tmux-capture)
+#+end_src
+
+** Manual
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "~/src/ob-tmux-extensions")
@@ -72,16 +79,15 @@ Run: =~/.config/emacs/bin/doom sync=
 (ob-tmux-capture-enable-advice)
 #+end_src
 
-** Basic Usage
+* Quick Start
 
-*** Pane snapshot (no execution)
+** 1. Create a tmux session
 
-#+begin_src org
-,#+begin_src tmux :session demo:main :capture pane
-,#+end_src
+#+begin_src shell
+tmux has-session -t demo 2>/dev/null || tmux new-session -d -s demo -n main
 #+end_src
 
-*** Execute with markers
+** 2. Capture with markers (execute + capture)
 
 #+begin_src org
 ,#+begin_src tmux :session demo:main :capture markers
@@ -89,69 +95,58 @@ kubectl get pods
 ,#+end_src
 #+end_src
 
-*** Record with asciinema
+** 3. Pane snapshot (grab what's on screen)
+
+#+begin_src org
+,#+begin_src tmux :session demo:main :capture pane
+,#+end_src
+#+end_src
+
+** 4. Record with asciinema
 
 #+begin_src org
 ,#+begin_src tmux :session demo:main :capture asciinema :log yes
 echo "Recording this!"
-date
 ,#+end_src
 #+end_src
 
 * Header Arguments
 
 | Argument | Values | Default | Description |
-|----------|--------|---------|-------------|
-| =:capture= | pane, markers, asciinema | markers | Capture method |
-| =:timeout= | seconds | 30 | Max wait time |
-| =:log= | yes, no | no | Enable CAST_LOG drawer |
-| =:cast-dir= | local, /path | XDG | Cast file storage |
-| =:keep-cast= | yes, no | no | Retain cast file |
-| =:stream-to= | stream-id | nil | Remote streaming |
-| =:idle-limit= | seconds | 2 | Max idle in recording |
-| =:lines= | N or -N | nil | Filter output (first/last N lines) |
-| =:grep= | pattern | nil | Filter output by regex |
+|----------+--------+---------+-------------|
+| =:capture= | =pane=, =markers=, =asciinema= | =markers= | Capture method |
+| =:timeout= | seconds | =30= | Max wait time |
+| =:lines= | N or -N | /none/ | First/last N lines of output |
+| =:grep= | regex | /none/ | Filter output lines |
+| =:raw= | =yes= / =no= | =no= | Keep prompts and echoes |
+| =:scrollback= | lines | /visible/ | Pane history depth |
+| =:log= | =yes= / =no= | =no= | CAST_LOG drawer (asciinema) |
+| =:stream-to= | stream-id | /none/ | Remote streaming (asciinema) |
+| =:keep-cast= | =yes= / =no= | =no= | Retain local cast file |
+| =:idle-limit= | seconds | =2= | Max idle in recording |
 
-* Configuration
+* Troubleshooting
 
-** XDG Storage (default)
+** Capture not working after install
 
-Cast files stored in =~/.local/share/ob-tmux-casts/=
+Check that advice is enabled:
 
-** Local Storage (next to org file)
-
-#+begin_src org
-,#+PROPERTY: header-args:tmux :cast-dir local
+#+begin_src emacs-lisp :results output
+(princ (if (advice-member-p 'ob-tmux-capture-advice-execute 'org-babel-execute:tmux)
+           "Advice enabled"
+         "Advice NOT enabled - run (ob-tmux-capture-enable-advice)"))
 #+end_src
 
-Creates =.ob-tmux-casts/= subdirectory.
+** Package not found after doom sync
 
-** Streaming
-
-Set up stream registry in =~/.config/doom/config.el=:
-
-#+begin_src emacs-lisp
-(setq ob-tmux-asciinema-stream-registry
-      '(("demo" . "your-producer-token-here")
-        ("tinkerbell" . "another-token")))
+#+begin_src shell
+~/.config/emacs/bin/doom doctor
 #+end_src
 
-Or use =#+STREAM:= keywords in org files.
-
-* Examples
-
-See [[file:/var/srv/research/org/docs/ob-tmux-demo.org][ob-tmux-demo.org]] for live examples.
-
-* Design Documentation
-
-Full design docs in [[file:/var/srv/research/org/docs/][/var/srv/research/org/docs/]]:
-
-- [[file:/var/srv/research/org/docs/ob-tmux-capture.org][ob-tmux-capture.org]] - Design rationale, implementation approaches
-- [[file:/var/srv/research/org/docs/pane-stream-design.org][pane-stream-design.org]] - Pane streaming architecture
-- [[file:/var/srv/research/org/docs/ob-tmux-demo.org][ob-tmux-demo.org]] - Live usage examples
+Rebuild: =M-x straight-rebuild-package RET ob-tmux-capture=
 
 * Credits
 
-Built by ii.coop research team, solving [[https://github.com/ahendriksen/ob-tmux/issues/6][ahendriksen/ob-tmux#6]].
+Built by [[https://ii.coop][ii.coop]], solving [[https://github.com/ahendriksen/ob-tmux/issues/6][ahendriksen/ob-tmux#6]].
 
 Based on =ob-tmux= by Allard Hendriksen.
